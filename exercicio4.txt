@@ -1,0 +1,126 @@
+Para a maioria dos cenários de análise de negócios e relatórios que envolvem Star Schema e Wide Table, Micro-Batch Processing é geralmente a melhor escolha. Ele permite uma atualização frequente dos dados sem os altos custos computacionais do fluxo contínuo, mantendo os dados relativamente atualizados e aptos para análises quase em tempo real.
+
+Etapas do Micro-Batch Processing
+Carga Inicial dos Dados Brutos em Tabelas Temporárias
+
+Transformação para Star Schema
+
+Transformação para Wide Table
+
+Agendamento do Processo
+
+1. Carga Inicial dos Dados Brutos em Tabelas Temporárias
+Vamos usar Python para carregar os dados brutos dos arquivos CSV para as tabelas temporárias do banco de dados.
+####
+import pandas as pd
+import mysql.connector
+
+def load_data_from_csv_to_temp_table(conn, table_name, csv_file, columns):
+    cursor = conn.cursor()
+    df = pd.read_csv(csv_file)
+    for index, row in df.iterrows():
+        cursor.execute(f"INSERT INTO {table_name} ({', '.join(columns)}) VALUES ({', '.join(['%s'] * len(columns))})",
+                       tuple(row[col] for col in columns))
+    conn.commit()
+    cursor.close()
+
+# Configurar a conexão com o banco de dados
+conn = mysql.connector.connect(
+    host='localhost',
+    user='seu_usuario',
+    password='sua_senha',
+    database='seu_banco_de_dados'
+)
+
+# Carregar dados para as tabelas temporárias
+load_data_from_csv_to_temp_table(
+    conn,
+    'temp_olist_order_reviews_dataset',
+    'olist_order_reviews_dataset.csv',
+    ['review_id', 'order_id', 'review_score', 'review_comment_title', 'review_comment_message', 'review_creation_date', 'review_answer_timestamp']
+)
+
+load_data_from_csv_to_temp_table(
+    conn,
+    'temp_olist_orders_dataset',
+    'olist_orders_dataset.csv',
+    ['order_id', 'customer_id', 'order_status', 'order_purchase_timestamp', 'order_approved_at', 'order_delivered_carrier_date', 'order_delivered_customer_date', 'order_estimated_delivery_date']
+)
+
+# Adicione outras tabelas conforme necessário
+
+# Fechar a conexão com o banco de dados
+conn.close()
+
+
+
+2. Transformação para Star Schema
+Vamos usar SQL para transformar os dados das tabelas temporárias para as tabelas de dimensões e de fato.
+
+#########
+-- Tabela de Dimensão: DimProduto
+INSERT INTO DimProduto (product_id, product_category_name, product_name_length, product_description_length, product_photos_qty, product_weight_g, product_length_cm, product_height_cm, product_width_cm)
+SELECT DISTINCT product_id, product_category_name, product_name_length, product_description_length, product_photos_qty, product_weight_g, product_length_cm, product_height_cm, product_width_cm
+FROM temp_olist_products_dataset;
+
+-- Tabela de Dimensão: DimCliente
+INSERT INTO DimCliente (customer_id, customer_unique_id, customer_zip_code_prefix, customer_city, customer_state)
+SELECT DISTINCT customer_id, customer_unique_id, customer_zip_code_prefix, customer_city, customer_state
+FROM temp_olist_customers_dataset;
+
+-- Tabela de Dimensão: DimVendedor
+INSERT INTO DimVendedor (seller_id, seller_zip_code_prefix, seller_city, seller_state)
+SELECT DISTINCT seller_id, seller_zip_code_prefix, seller_city, seller_state
+FROM temp_olist_sellers_dataset;
+
+-- Tabela de Dimensão: DimTempo
+INSERT INTO DimTempo (ano, mes, dia)
+SELECT DISTINCT YEAR(order_purchase_timestamp) AS ano, MONTH(order_purchase_timestamp) AS mes, DAY(order_purchase_timestamp) AS dia
+FROM temp_olist_orders_dataset;
+
+-- Tabela de Fato: FatoVendas
+INSERT INTO FatoVendas (product_id, customer_id, seller_id, tempo_id, quantidade, valor_total)
+SELECT oi.product_id, o.customer_id, oi.seller_id, t.tempo_id, oi.order_item_id AS quantidade, oi.price AS valor_total
+FROM temp_olist_order_items_dataset oi
+JOIN temp_olist_orders_dataset o ON oi.order_id = o.order_id
+JOIN DimTempo t ON t.ano = YEAR(o.order_purchase_timestamp) AND t.mes = MONTH(o.order_purchase_timestamp);
+
+
+
+3. Transformação para Wide Table
+Vamos criar a Wide Table combinando os dados transformados.
+
+##########
+INSERT INTO WideTableVendas (
+    ano, mes, product_id, product_category_name, product_name_length, product_description_length, product_photos_qty, product_weight_g, product_length_cm, product_height_cm, product_width_cm,
+    customer_id, customer_unique_id, customer_zip_code_prefix, customer_city, customer_state,
+    seller_id, seller_zip_code_prefix, seller_city, seller_state,
+    quantidade, valor_total
+)
+SELECT 
+    YEAR(o.order_purchase_timestamp) AS ano,
+    MONTH(o.order_purchase_timestamp) AS mes,
+    p.product_id, p.product_category_name, p.product_name_length, p.product_description_length, p.product_photos_qty, p.product_weight_g, p.product_length_cm, p.product_height_cm, p.product_width_cm,
+    c.customer_id, c.customer_unique_id, c.customer_zip_code_prefix, c.customer_city, c.customer_state,
+    s.seller_id, s.seller_zip_code_prefix, s.seller_city, s.seller_state,
+    oi.order_item_id AS quantidade, oi.price AS valor_total
+FROM temp_olist_order_items_dataset oi
+JOIN temp_olist_orders_dataset o ON oi.order_id = o.order_id
+JOIN temp_olist_products_dataset p ON oi.product_id = p.product_id
+JOIN temp_olist_customers_dataset c ON o.customer_id = c.customer_id
+JOIN temp_olist_sellers_dataset s ON oi.seller_id = s.seller_id;
+
+
+
+4. Agendamento do Processo
+Para agendar o processo de Micro-Batch, você pode usar uma ferramenta de agendamento como cron no Linux ou o Agendador de Tarefas no Windows. Vamos criar um exemplo de cron job que roda a cada hora.
+
+########
+1 - Abra o crontab para editar:
+crontab -e
+2 - Adicione a linha para agendar o script Python para rodar a cada hora:
+0 * * * * /usr/bin/python3 /caminho/para/seu/script.py
+
+
+
+*********Esse fluxo cobre a carga inicial dos dados brutos, transformação para um Star Schema e Wide Table usando Micro-Batch Processing. A abordagem de Micro-Batch permite uma atualização frequente dos dados, mantendo um equilíbrio entre tempestividade e eficiência de processamento.
